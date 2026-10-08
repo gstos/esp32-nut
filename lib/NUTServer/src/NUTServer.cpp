@@ -336,6 +336,14 @@ void NUTServer::processCommand(Print& client, int slot, const String& cmdLine) {
                     client.printf("CMD %s beeper.disable\n", upsName.c_str());
                     client.printf("CMD %s beeper.toggle\n", upsName.c_str());
                 }
+                bool has_shutdown = _usb_ups->supportsUPSTimer(UPSTimer::Shutdown);
+                bool has_startup = _usb_ups->supportsUPSTimer(UPSTimer::Startup);
+                for (const char* const* c = UPSTimerLogic::commands(); *c; c++) {
+                    String name = *c;
+                    if (UPSTimerLogic::needsShutdown(name) && !has_shutdown) continue;
+                    if (UPSTimerLogic::needsStartup(name) && !has_startup) continue;
+                    client.printf("CMD %s %s\n", upsName.c_str(), *c);
+                }
             }
             client.printf("END LIST %s %s\n", subcmd.c_str(), upsName.c_str());
             return;
@@ -409,6 +417,39 @@ void NUTServer::processCommand(Print& client, int slot, const String& cmdLine) {
                 _usb_ups->setBeeper(!enabled);
                 client.print("OK\n");
             }
+            return;
+        }
+
+        // Shutdown commands (issue #23): they can switch the load off
+        std::vector<UPSTimerLogic::Step> steps;
+        const char* planError = nullptr;
+        String value = tokens.size() > 3 ? tokens[3] : String("");
+        if (UPSTimerLogic::plan(cmdName, tokens.size() > 3 ? &value : nullptr, steps, planError)) {
+            if (!authRequired) {
+                // Without NUT credentials anyone reaching the port could cut the power
+                client.print("ERR ACCESS-DENIED\n");
+                return;
+            }
+            for (const auto& step : steps) {
+                if (!_usb_ups || !_usb_ups->supportsUPSTimer(step.timer)) {
+                    client.print("ERR CMD-NOT-SUPPORTED\n");
+                    return;
+                }
+            }
+            for (size_t i = 0; i < steps.size(); i++) {
+                if (i > 0) delay(UPSTimerLogic::STEP_GAP_MS);
+                if (!_usb_ups->setUPSTimer(steps[i].timer, steps[i].seconds)) {
+                    Serial.printf("[NUTServer] INSTCMD %s failed at step %u\n", cmdName.c_str(), (unsigned)(i + 1));
+                    client.print("ERR INSTCMD-FAILED\n");
+                    return;
+                }
+            }
+            Serial.printf("[NUTServer] INSTCMD %s by %s\n", cmdName.c_str(), _clientUsername[slot].c_str());
+            client.print("OK\n");
+            return;
+        }
+        if (strcmp(planError, "INVALID-ARGUMENT") == 0) {
+            client.print("ERR INVALID-ARGUMENT\n");
             return;
         }
         client.print("ERR CMD-NOT-SUPPORTED\n");

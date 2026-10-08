@@ -794,6 +794,58 @@ bool USBHostUPS::supportsBeeperToggle() const {
     return getActiveBeeperPath() != "";
 }
 
+bool USBHostUPS::supportsUPSTimer(UPSTimer timer) const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_is_ready_to_poll || !_driver || !_driver->upsTimersControllable()) return false;
+    return UPSTimerLogic::resolve(_hid_parser.getUsages(), timer) != nullptr;
+}
+
+bool USBHostUPS::setUPSTimer(UPSTimer timer, int32_t seconds) {
+    // Called by NUT: wait for the current poll step, never overlap it
+    if (!_op_mutex || xSemaphoreTake(_op_mutex, pdMS_TO_TICKS(OP_WAIT_MS)) != pdTRUE) return false;
+    bool ok = setUPSTimerLocked(timer, seconds);
+    xSemaphoreGive(_op_mutex);
+    return ok;
+}
+
+bool USBHostUPS::setUPSTimerLocked(UPSTimer timer, int32_t seconds) {
+    if (!_is_ready_to_poll || !_hid_dev_handle) return false;
+    if (!_link.canPoll(millis())) return false;
+
+    HIDUsageDef def;
+    {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
+        if (!_driver || !_driver->upsTimersControllable()) return false;
+        const HIDUsageDef* found = UPSTimerLogic::resolve(_hid_parser.getUsages(), timer);
+        if (!found) return false;
+        def = *found;
+    }
+
+    // The report holds only this countdown (resolve() checks it): nothing to read back,
+    // and no other field can go out as zero
+    memset(_request_buffer, 0, sizeof(_request_buffer));
+    size_t len = UPSTimerLogic::encode(def, seconds, _request_buffer, sizeof(_request_buffer));
+    if (len == 0) {
+        log("WARN", "[UPS] %s: %ld s refused for %s", UPSTimerLogic::dataKey(timer), (long)seconds, def.path);
+        return false;
+    }
+
+    // Blocking control transfer: no application lock held (ADR 0008)
+    esp_err_t err = hid_class_request_set_report(_hid_dev_handle, HID_REPORT_TYPE_FEATURE, def.report_id, _request_buffer, len);
+    noteControlResult(err, millis());
+    log(err == ESP_OK ? "INFO" : "ERROR", "[UPS] %s = %ld s via %s (report 0x%02X): %s",
+        UPSTimerLogic::dataKey(timer), (long)seconds, def.path, (unsigned)def.report_id, esp_err_to_name(err));
+    if (err != ESP_OK) return false;
+
+    // Shown at once only when the driver polls the countdown: a key nothing refreshes
+    // would freeze at the written value
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (_ups_data.hasKey(UPSTimerLogic::dataKey(timer))) {
+        _ups_data.set(UPSTimerLogic::dataKey(timer), String(seconds));
+    }
+    return true;
+}
+
 String USBHostUPS::dumpUSBDiagnostics() {
     JsonDocument doc;
 

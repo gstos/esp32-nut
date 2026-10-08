@@ -65,6 +65,20 @@ public:
     bool isDataStale() const override { return stale; }
     bool supportsBeeperToggle() const override { return beeperToggleSupported; }
 
+    // Shutdown countdowns (issue #23)
+    bool shutdownTimer = false;
+    bool startupTimer = false;
+    int failWrite = -1; // index of the write that fails, -1 for none
+    std::vector<std::pair<UPSTimer, int32_t>> timerWrites;
+    bool supportsUPSTimer(UPSTimer t) const override {
+        return t == UPSTimer::Shutdown ? shutdownTimer : startupTimer;
+    }
+    bool setUPSTimer(UPSTimer t, int32_t seconds) override {
+        if ((int)timerWrites.size() == failWrite) return false;
+        timerWrites.push_back({t, seconds});
+        return true;
+    }
+
     std::vector<HIDUsageDef> _mockUsages;
     HIDParser _hid_parser;
     const HIDParser* getHIDParser() const override { return &_hid_parser; }
@@ -89,6 +103,10 @@ void setUp(void) {
     mockHost.beeperToggleSupported = true;
     mockHost.connected = true;
     mockHost.stale = false;
+    mockHost.shutdownTimer = false;
+    mockHost.startupTimer = false;
+    mockHost.failWrite = -1;
+    mockHost.timerWrites.clear();
 
     NUTServerConfig config;
     config.username = "admin";
@@ -249,6 +267,148 @@ void test_beeper_hidden_when_not_controllable(void) {
     server.processCommand(printer, 0, "INSTCMD testups beeper.enable");
     TEST_ASSERT_EQUAL_STRING("ERR CMD-NOT-SUPPORTED\n", printer.getOutput().c_str());
     TEST_ASSERT_TRUE(mockHost.beeperState); // unchanged
+}
+
+// --- Shutdown commands (issue #23) ---
+
+static bool listed(const std::string& out, const char* cmd) {
+    return out.find(std::string("CMD testups ") + cmd + "\n") != std::string::npos;
+}
+
+void test_shutdown_cmds_hidden_without_timers(void) {
+    server.processCommand(printer, 0, "LIST CMD testups");
+    std::string out = printer.getOutput();
+    TEST_ASSERT_TRUE(out.find("shutdown") == std::string::npos);
+    TEST_ASSERT_TRUE(out.find("load.") == std::string::npos);
+}
+
+void test_shutdown_cmds_listed_with_timers(void) {
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    server.processCommand(printer, 0, "LIST CMD testups");
+    std::string out = printer.getOutput();
+    TEST_ASSERT_TRUE(listed(out, "load.off.delay"));
+    TEST_ASSERT_TRUE(listed(out, "load.on.delay"));
+    TEST_ASSERT_TRUE(listed(out, "shutdown.return"));
+    TEST_ASSERT_TRUE(listed(out, "shutdown.stayoff"));
+    TEST_ASSERT_TRUE(listed(out, "shutdown.stop"));
+    TEST_ASSERT_TRUE(out.rfind("END LIST CMD testups\n") == out.size() - strlen("END LIST CMD testups\n"));
+}
+
+void test_shutdown_return_needs_both_timers(void) {
+    // Shutdown countdown only: no command that also needs the startup one
+    mockHost.shutdownTimer = true;
+    server.processCommand(printer, 0, "LIST CMD testups");
+    std::string out = printer.getOutput();
+    TEST_ASSERT_TRUE(listed(out, "load.off.delay"));
+    TEST_ASSERT_TRUE(listed(out, "shutdown.stop"));
+    TEST_ASSERT_FALSE(listed(out, "load.on.delay"));
+    TEST_ASSERT_FALSE(listed(out, "shutdown.return"));
+    TEST_ASSERT_FALSE(listed(out, "shutdown.stayoff"));
+
+    server.setAuthenticated(0, true);
+    printer.clear();
+    server.processCommand(printer, 0, "INSTCMD testups shutdown.return");
+    TEST_ASSERT_EQUAL_STRING("ERR CMD-NOT-SUPPORTED\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(0, mockHost.timerWrites.size()); // not even the first step
+}
+
+void test_instcmd_shutdown_return_sequence(void) {
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    server.setAuthenticated(0, true);
+
+    server.processCommand(printer, 0, "INSTCMD testups shutdown.return");
+    TEST_ASSERT_EQUAL_STRING("OK\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(2, mockHost.timerWrites.size());
+    TEST_ASSERT_TRUE(mockHost.timerWrites[0].first == UPSTimer::Startup);
+    TEST_ASSERT_EQUAL(30, mockHost.timerWrites[0].second);
+    TEST_ASSERT_TRUE(mockHost.timerWrites[1].first == UPSTimer::Shutdown);
+    TEST_ASSERT_EQUAL(20, mockHost.timerWrites[1].second);
+}
+
+void test_instcmd_load_off_delay_with_value(void) {
+    mockHost.shutdownTimer = true;
+    server.setAuthenticated(0, true);
+
+    server.processCommand(printer, 0, "INSTCMD testups load.off.delay 120");
+    TEST_ASSERT_EQUAL_STRING("OK\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(1, mockHost.timerWrites.size());
+    TEST_ASSERT_EQUAL(120, mockHost.timerWrites[0].second);
+
+    printer.clear();
+    server.processCommand(printer, 0, "INSTCMD testups shutdown.stop");
+    TEST_ASSERT_EQUAL_STRING("OK\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(2, mockHost.timerWrites.size());
+    TEST_ASSERT_TRUE(mockHost.timerWrites[1].first == UPSTimer::Shutdown);
+    TEST_ASSERT_EQUAL(-1, mockHost.timerWrites[1].second);
+}
+
+void test_instcmd_refuses_instant_off(void) {
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    server.setAuthenticated(0, true);
+
+    const char* lines[] = {
+        "INSTCMD testups load.off.delay 0",
+        "INSTCMD testups load.off.delay 5",
+        "INSTCMD testups load.off.delay -1",
+        "INSTCMD testups shutdown.return 0",
+        "INSTCMD testups load.off.delay soon",
+    };
+    for (const char* line : lines) {
+        printer.clear();
+        server.processCommand(printer, 0, line);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("ERR INVALID-ARGUMENT\n", printer.getOutput().c_str(), line);
+    }
+    TEST_ASSERT_EQUAL(0, mockHost.timerWrites.size());
+}
+
+void test_instcmd_shutdown_requires_login(void) {
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    // begin() keeps the sessions; a new connection clears its slot like this
+    server.setAuthenticated(0, false);
+    server.processCommand(printer, 0, "INSTCMD testups shutdown.return");
+    TEST_ASSERT_EQUAL_STRING("ERR ACCESS-DENIED\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(0, mockHost.timerWrites.size());
+}
+
+void test_instcmd_shutdown_refused_without_credentials(void) {
+    // No NUT credentials configured: the beeper stays open, cutting the power does not
+    NUTServerConfig open;
+    open.ups_name = "testups";
+    server.begin(open, &mockHost, 3493);
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    mockHost.data.set("ups.beeper.status", "enabled");
+
+    server.processCommand(printer, 0, "INSTCMD testups beeper.disable");
+    TEST_ASSERT_EQUAL_STRING("OK\n", printer.getOutput().c_str());
+
+    printer.clear();
+    server.processCommand(printer, 0, "INSTCMD testups load.off.delay");
+    TEST_ASSERT_EQUAL_STRING("ERR ACCESS-DENIED\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(0, mockHost.timerWrites.size());
+}
+
+void test_instcmd_shutdown_write_failure(void) {
+    mockHost.shutdownTimer = true;
+    mockHost.startupTimer = true;
+    mockHost.failWrite = 1; // startup written, shutdown fails
+    server.setAuthenticated(0, true);
+
+    server.processCommand(printer, 0, "INSTCMD testups shutdown.return");
+    TEST_ASSERT_EQUAL_STRING("ERR INSTCMD-FAILED\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(1, mockHost.timerWrites.size());
+}
+
+void test_instcmd_shutdown_wrong_ups(void) {
+    mockHost.shutdownTimer = true;
+    server.setAuthenticated(0, true);
+    server.processCommand(printer, 0, "INSTCMD otherups load.off.delay");
+    TEST_ASSERT_EQUAL_STRING("ERR UNKNOWN-UPS\n", printer.getOutput().c_str());
+    TEST_ASSERT_EQUAL(0, mockHost.timerWrites.size());
 }
 
 // Issue #47: frozen values must not be served as current (upsd behaviour)
@@ -462,6 +622,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_get_var_compliance);
     RUN_TEST(test_instcmd_beeper);
     RUN_TEST(test_beeper_hidden_when_not_controllable);
+    RUN_TEST(test_shutdown_cmds_hidden_without_timers);
+    RUN_TEST(test_shutdown_cmds_listed_with_timers);
+    RUN_TEST(test_shutdown_return_needs_both_timers);
+    RUN_TEST(test_instcmd_shutdown_return_sequence);
+    RUN_TEST(test_instcmd_load_off_delay_with_value);
+    RUN_TEST(test_instcmd_refuses_instant_off);
+    RUN_TEST(test_instcmd_shutdown_requires_login);
+    RUN_TEST(test_instcmd_shutdown_refused_without_credentials);
+    RUN_TEST(test_instcmd_shutdown_write_failure);
+    RUN_TEST(test_instcmd_shutdown_wrong_ups);
     RUN_TEST(test_list_client_terminates);
     RUN_TEST(test_list_cmd_unaffected_by_client);
     RUN_TEST(test_get_upsdesc_and_numlogins);
@@ -482,6 +652,16 @@ void setup() {
     RUN_TEST(test_get_var_compliance);
     RUN_TEST(test_instcmd_beeper);
     RUN_TEST(test_beeper_hidden_when_not_controllable);
+    RUN_TEST(test_shutdown_cmds_hidden_without_timers);
+    RUN_TEST(test_shutdown_cmds_listed_with_timers);
+    RUN_TEST(test_shutdown_return_needs_both_timers);
+    RUN_TEST(test_instcmd_shutdown_return_sequence);
+    RUN_TEST(test_instcmd_load_off_delay_with_value);
+    RUN_TEST(test_instcmd_refuses_instant_off);
+    RUN_TEST(test_instcmd_shutdown_requires_login);
+    RUN_TEST(test_instcmd_shutdown_refused_without_credentials);
+    RUN_TEST(test_instcmd_shutdown_write_failure);
+    RUN_TEST(test_instcmd_shutdown_wrong_ups);
     RUN_TEST(test_list_client_terminates);
     RUN_TEST(test_list_cmd_unaffected_by_client);
     RUN_TEST(test_get_upsdesc_and_numlogins);

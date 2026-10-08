@@ -84,6 +84,14 @@ public:
      * ups.beeper.status is still reported read-only.
      */
     virtual bool beeperControllable() const { return true; }
+
+    /**
+     * @brief True when the shutdown/startup countdowns may be written (issue #23).
+     *
+     * Off by default: a wrong write switches the load off, so a driver opts in only
+     * for devices where the countdowns were tested.
+     */
+    virtual bool upsTimersControllable() const { return false; }
 };
 
 #endif // I_UPS_DRIVER_H

@@ -62,6 +62,8 @@ public:
     bool isConnected() const override;
     bool isDataStale() const override;
     bool supportsBeeperToggle() const override;
+    bool supportsUPSTimer(UPSTimer timer) const override;
+    bool setUPSTimer(UPSTimer timer, int32_t seconds) override;
 
     void setLogCallback(LogCallback cb);
     void logDebug(const String& msg) const override;
@@ -148,6 +150,7 @@ private:
     void requestRestart(const char* why);
     void logStats(uint32_t now);
     bool setBeeperLocked(bool enable); // _op_mutex held
+    bool setUPSTimerLocked(UPSTimer timer, int32_t seconds); // _op_mutex held
     void log(const char* level, const char* fmt, ...) const;
 
     QueueHandle_t _event_queue;

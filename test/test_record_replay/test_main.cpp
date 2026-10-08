@@ -48,6 +48,11 @@ void test_replay_apc_es700g_issue71(void) {
     FixtureReplayRunner::runFixtureTest("test/fixtures/apc/apc_backups_es700g_vid051d_pid0002_issue71.json");
 }
 
+// Live dump of a Smart-UPS 3000 (SUA3000, FW 655.19.D), serial number removed (issue #23)
+void test_replay_apc_smartups3000_issue23(void) {
+    FixtureReplayRunner::runFixtureTest("test/fixtures/apc/apc_smartups_3000_vid051d_pid0002_issue23.json");
+}
+
 void test_replay_powercom_spd750u(void) {
     FixtureReplayRunner::runFixtureTest("test/fixtures/powercom/powercom_spd750u_vid0d9f_pid0004_issue21.json");
 }
@@ -82,6 +87,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_replay_apc_bx1500g_issue55);
     RUN_TEST(test_replay_apc_bx750mi_issue60);
     RUN_TEST(test_replay_apc_es700g_issue71);
+    RUN_TEST(test_replay_apc_smartups3000_issue23);
     RUN_TEST(test_replay_powercom_spd750u);
     RUN_TEST(test_replay_cyberpower_cp1350c);
     RUN_TEST(test_replay_cyberpower_cp1500epfclcd);
@@ -102,6 +108,7 @@ void setup() {
     RUN_TEST(test_replay_apc_bx1500g_issue55);
     RUN_TEST(test_replay_apc_bx750mi_issue60);
     RUN_TEST(test_replay_apc_es700g_issue71);
+    RUN_TEST(test_replay_apc_smartups3000_issue23);
     RUN_TEST(test_replay_powercom_spd750u);
     RUN_TEST(test_replay_cyberpower_cp1350c);
     RUN_TEST(test_replay_cyberpower_cp1500epfclcd);

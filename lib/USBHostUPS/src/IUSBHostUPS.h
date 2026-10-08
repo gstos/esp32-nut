@@ -6,6 +6,7 @@
 #include "UPSData.h"
 #include "HIDUsages.h"
 #include "HIDParser.h"
+#include "UPSTimerLogic.h"
 
 class IUSBHostUPS {
 public:
@@ -42,6 +43,11 @@ public:
     // no device attached (after the boot grace). Consumers must not serve them as current.
     virtual bool isDataStale() const { return false; }
     virtual bool supportsBeeperToggle() const { return true; }
+    // Shutdown/startup countdowns behind load.off.delay & co (issue #23). Off unless the
+    // driver opts in and the device has a field UPSTimerLogic::resolve() accepts.
+    virtual bool supportsUPSTimer(UPSTimer timer) const { return false; }
+    // Writes the countdown in seconds, or -1 to stop it
+    virtual bool setUPSTimer(UPSTimer timer, int32_t seconds) { return false; }
 
     virtual const std::vector<HIDUsageDef>& getUsages() const = 0;
     virtual const HIDUsageDef* getUsageDef(uint32_t usage) const = 0;

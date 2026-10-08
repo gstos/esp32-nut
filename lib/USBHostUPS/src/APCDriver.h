@@ -28,6 +28,9 @@ public:
     static bool splitProduct(const String& product, String& model, String& firmware, String& aux);
     // ups.model without the firmware, which goes to ups.firmware / ups.firmware.aux (issue #76)
     void formatDeviceStrings(UPSData& data) override;
+    // Smart-UPS (issue #23). Not the Back-UPS BX: it acknowledges some delay writes
+    // without acting on them (apc-hid.c, NUT issue #2683), and its EP0 locks up (#60).
+    bool upsTimersControllable() const override { return !_back_ups_bx; }
 
 protected:
     void onLoop(IUSBHostUPS* host, UPSData& data) override;
